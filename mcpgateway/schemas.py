@@ -4801,9 +4801,6 @@ class A2AAgentCreate(BaseModel):
             return None
         # HTTP header name must be a token per RFC 7230 section 3.2
         # Token chars: alphanumeric, !, #, $, %, &, ', *, +, -, ., ^, _, `, |, ~
-        # Standard
-        import re
-
         header_name_pattern = re.compile(r"^[a-zA-Z0-9!#$%&'*+\-.^_`|~]+$")
         invalid_headers = [h for h in v if not header_name_pattern.match(h)]
         if invalid_headers:
@@ -5158,9 +5155,6 @@ class A2AAgentUpdate(BaseModelWithConfigDict):
             return None
         # HTTP header name must be a token per RFC 7230 section 3.2
         # Token chars: alphanumeric, !, #, $, %, &, ', *, +, -, ., ^, _, `, |, ~
-        # Standard
-        import re
-
         header_name_pattern = re.compile(r"^[a-zA-Z0-9!#$%&'*+\-.^_`|~]+$")
         invalid_headers = [h for h in v if not header_name_pattern.match(h)]
         if invalid_headers:
