@@ -2164,7 +2164,10 @@ async def request_validation_exception_handler(_request: Request, exc: RequestVa
         exc: The RequestValidationError exception containing failure details.
 
     Returns:
-        JSONResponse: A 422 Unprocessable Entity response with error details.
+        JSONResponse: A 422 Unprocessable Entity response. In production mode
+            (``should_expose_error_details()`` returns False) returns a generic
+            ``{"detail": "An error occurred, please try again."}`` to avoid leaking
+            validation internals. In verbose mode returns field-level error details.
     """
     logger.warning("Request validation error on %s: %s", _request.url.path if _request else "unknown", sanitize_validation_error_for_log(exc))
 

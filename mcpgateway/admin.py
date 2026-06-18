@@ -15070,6 +15070,7 @@ async def admin_import_tools(
             # Detailed format for frontend
             "details": {
                 "success": [item["name"] for item in created if item.get("name")],
+                # "message" is set in verbose mode; "detail" is set in production mode
                 "failed": [{"name": item["name"], "error": item["error"].get("message") or item["error"].get("detail", str(item["error"]))} for item in errors],
             },
         }
