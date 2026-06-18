@@ -11,6 +11,7 @@ authors = ["ContextForge Contributors"]
 [dependencies]
 # Async runtime
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio-stream = "0.1.17"
 
 # Web framework
 axum = "0.8.9"
