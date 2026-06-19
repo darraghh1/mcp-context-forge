@@ -12529,6 +12529,7 @@ class TestRemainingCoverageGaps:
         monkeypatch.setattr(main_mod.settings, "skip_ssl_verify", True, raising=False)
         main_mod.log_security_recommendations({"secure_secrets": False, "auth_enabled": False})
 
+    @pytest.mark.asyncio
     async def test_request_validation_exception_handler_production_suppression(self, monkeypatch):
         # First-Party
         import mcpgateway.main as main_mod

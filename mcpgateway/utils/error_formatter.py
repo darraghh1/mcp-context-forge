@@ -68,9 +68,6 @@ class ErrorFormatter:
             Dict[str, Any]: ``{"detail": str}`` in production mode (when ``should_expose_error_details()`` returns False), or
                 ``{"message": str, "details": [...], "success": bool}`` in verbose mode.
         """
-        # Log only loc/type — never msg, ctx, input, or input_value (Pydantic v2 includes input_value in str())
-        logger.warning("Validation error: %s", sanitize_validation_error_for_log(error))
-
         if not should_expose_error_details():
             return {"detail": "An error occurred, please try again."}
 
