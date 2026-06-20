@@ -1955,13 +1955,15 @@ class GatewayService(BaseService):  # pylint: disable=too-many-instance-attribut
             for warning in token_validation.warnings:
                 logger.warning("OAuth token validation for gateway %s: %s", gateway.name, warning)
 
-            # Fail fast if any claim is definitively mismatched (present but wrong).
-            # Claims that are simply absent from the token produce None (not False)
-            # and are NOT blocked — this preserves backward compat with legacy IdPs.
+            # Advisory only — the upstream MCP server is the authoritative token validator
+            # (see token_validation_service docstring). A proxy gateway that fronts a third
+            # party (e.g. an MCP server brokering Microsoft Graph) legitimately forwards a
+            # Graph token whose iss=Entra and aud=Graph can never equal the gateway's own
+            # discovery issuer / URL — so a claim mismatch must NOT block forwarding. The
+            # downstream server (and Graph) reject a genuinely bad token. Log, don't raise.
             blocking = token_validation.blocking_errors
             if blocking:
-                detail = "; ".join(blocking)
-                raise GatewayConnectionError(f"Refusing to forward OAuth token for gateway '{gateway.name}': {detail}. Fix oauth_config (resource/scopes/issuer) or the IdP token request.")
+                logger.warning("OAuth token claim mismatch for gateway %s — forwarding anyway, upstream validates: %s", gateway.name, "; ".join(blocking))
 
             # Now connect to MCP server with the access token
             authentication = {"Authorization": f"Bearer {access_token}"}
