@@ -6,16 +6,20 @@
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
+use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -179,8 +183,139 @@ async fn extended_agent_card_handler(State(state): State<AppState>) -> Json<Valu
     ))
 }
 
-async fn jsonrpc_handler(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
-    (StatusCode::OK, Json(handle_jsonrpc_body(&state, &body)))
+async fn jsonrpc_handler(State(state): State<AppState>, body: Bytes) -> Response {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(&body) {
+        if let Some(method) = parsed.get("method").and_then(Value::as_str) {
+            if matches!(method, "SendStreamingMessage" | "message/stream") {
+                return streaming_jsonrpc_response(state.clone(), parsed).into_response();
+            }
+        }
+    }
+    (StatusCode::OK, Json(handle_jsonrpc_body(&state, &body))).into_response()
+}
+
+/// Test-driving directive for streaming dispatch. Tests embed
+/// `stream:chunks=N,delay_ms=M` as the message text prefix to drive a
+/// specific chunk count and per-chunk delay. Without the prefix the
+/// agent yields a single chunk and closes (default behavior — the
+/// shape compatibility tests rely on at-least-one chunk).
+#[derive(Debug, Clone, Copy)]
+struct StreamDirective {
+    chunks: usize,
+    delay_ms: u64,
+}
+
+impl Default for StreamDirective {
+    fn default() -> Self {
+        Self {
+            chunks: 1,
+            delay_ms: 0,
+        }
+    }
+}
+
+/// Parse `stream:chunks=N,delay_ms=M` from a text part. Missing or
+/// unparseable values fall back to the default (1 chunk, no delay)
+/// so non-test traffic always sees the simplest viable stream shape.
+fn parse_stream_directive(text: &str) -> StreamDirective {
+    let Some(rest) = text.strip_prefix("stream:") else {
+        return StreamDirective::default();
+    };
+    let mut directive = StreamDirective::default();
+    for piece in rest.split(',') {
+        if let Some((key, value)) = piece.split_once('=') {
+            match key.trim() {
+                "chunks" => {
+                    if let Ok(n) = value.trim().parse::<usize>() {
+                        directive.chunks = n.max(1);
+                    }
+                }
+                "delay_ms" => {
+                    if let Ok(n) = value.trim().parse::<u64>() {
+                        directive.delay_ms = n;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    directive
+}
+
+/// Build an SSE response that emits one or more JSON-RPC envelopes
+/// for streaming dispatch. Intermediate chunks advertise the task in
+/// `working` state; the final chunk advertises `completed`. Each
+/// chunk is a complete JSON-RPC envelope (matches what the gateway's
+/// `dispatch_a2a_jsonrpc_streaming` expects to parse out of `data:`
+/// lines).
+fn streaming_jsonrpc_response(
+    state: AppState,
+    parsed: Value,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let id = parsed.get("id").cloned().unwrap_or(Value::Null);
+    let method = parsed
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("SendStreamingMessage")
+        .to_string();
+    let jsonrpc = parsed
+        .get("jsonrpc")
+        .and_then(Value::as_str)
+        .unwrap_or("2.0")
+        .to_string();
+    let params = parsed.get("params").cloned().unwrap_or(Value::Null);
+    let text = extract_text(&params).unwrap_or_default();
+    let directive = parse_stream_directive(&text);
+    let output_text = echo_text(&state.config, &text);
+    let use_v1 = uses_v1_method(&method);
+
+    let final_task = StoredTask {
+        id: Uuid::new_v4().to_string(),
+        context_id: Uuid::new_v4().to_string(),
+        input_text: text,
+        output_text,
+        state: "completed".to_string(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    store_task(&state, final_task.clone());
+
+    let chunks_total = directive.chunks;
+    let delay = Duration::from_millis(directive.delay_ms);
+    let task_arc = Arc::new(final_task);
+    let id_arc = Arc::new(id);
+    let jsonrpc_arc = Arc::new(jsonrpc);
+
+    let stream = stream::unfold(
+        (0usize, task_arc, id_arc, jsonrpc_arc),
+        move |(index, task, id, jsonrpc)| async move {
+            if index >= chunks_total {
+                return None;
+            }
+            if index > 0 && !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let is_last = index + 1 == chunks_total;
+            let mut chunk = (*task).clone();
+            chunk.state = if is_last { "completed" } else { "working" }.to_string();
+            chunk.updated_at = Utc::now();
+            let task_value = task_to_value(&chunk, use_v1);
+            let result = if use_v1 {
+                json!({ "task": task_value })
+            } else {
+                task_value
+            };
+            let envelope = json!({
+                "jsonrpc": (*jsonrpc).clone(),
+                "id": (*id).clone(),
+                "result": result,
+            });
+            let event = Event::default().data(envelope.to_string());
+            Some((Ok::<_, Infallible>(event), (index + 1, task, id, jsonrpc)))
+        },
+    );
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 fn handle_jsonrpc_body(state: &AppState, body: &[u8]) -> JsonRpcResponse {
@@ -527,7 +662,7 @@ fn agent_card_v1(config: &Config, base_url: &str) -> Value {
         "description": "Rust A2A echo agent for ContextForge integration testing",
         "version": APP_VERSION,
         "capabilities": {
-            "streaming": false,
+            "streaming": true,
             "pushNotifications": false,
             "stateTransitionHistory": true,
             "echo": true
@@ -557,7 +692,7 @@ fn agent_card_legacy(config: &Config, base_url: &str) -> Value {
         "version": APP_VERSION,
         "protocolVersion": config.protocol_version,
         "capabilities": {
-            "streaming": false,
+            "streaming": true,
             "pushNotifications": false,
             "stateTransitionHistory": true,
             "echo": true
